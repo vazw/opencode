@@ -1,4 +1,5 @@
 export * as ConfigAgentPlugin from "./agent.js"
+export { pathActions }
 
 import { define } from "@opencode/plugin/effect/plugin"
 import { Document, Info, type Entry } from "@opencode/schema/config"
