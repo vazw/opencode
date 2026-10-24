@@ -896,3 +896,181 @@ describe("shell scanner permission impact", () => {
     }
   }
 })
+
+describe("shell deny resource variants", () => {
+  // Deny witnesses are passed as literal arrays on purpose: wiring them from the scanner is proven
+  // end to end in test/tool-shell.test.ts, so duplicating that mapping here would let this suite
+  // stay green while the shell tool forgot to forward them.
+  const fleet: Permission.Ruleset = [
+    { action: "shell", resource: "*", effect: "allow" },
+    { action: "shell", resource: "ssh *", effect: "deny" },
+  ]
+
+  function effectOf(input: Partial<Permission.AssertInput>) {
+    return Effect.gen(function* () {
+      const service = yield* Permission.Service
+      const result = yield* service.ask({ ...assertion(input), id: Permission.ID.create() })
+      if (result.effect === "ask") yield* service.reply({ requestID: result.id, reply: "once" })
+      return result.effect
+    })
+  }
+
+  it.effect("denies path-qualified, wrapper-prefixed, and assignment-prefixed spellings of a denied command", () =>
+    Effect.gen(function* () {
+      yield* setup(fleet)
+      for (const [resource, denyResources] of [
+        ["/usr/bin/ssh -V", ["ssh -V"]],
+        ["~/bin/ssh -V", ["ssh -V"]],
+        ["$HOME/bin/ssh -V", ["ssh -V"]],
+        ["./ssh -V", ["ssh -V"]],
+        ["command ssh -V", ["ssh -V"]],
+        ["env ssh -V", ["ssh -V"]],
+        ["/usr/bin/env ssh -V", ["ssh -V"]],
+        ["FOO=1 ssh -V", ["ssh -V"]],
+      ] as const) {
+        expect(yield* effectOf({ action: "shell", resources: [resource], denyResources }), resource).toBe("deny")
+      }
+      // Control: the raw span already matches, so the fixture itself is proven.
+      expect(yield* effectOf({ action: "shell", resources: ["ssh -V"] })).toBe("deny")
+    }),
+  )
+
+  it.effect("denies path-qualified wrapper and assignment chains", () =>
+    Effect.gen(function* () {
+      yield* setup(fleet)
+      for (const resource of [
+        "/usr/bin/env ssh -V",
+        "./env ssh -V",
+        "FOO=1 /usr/bin/env /usr/bin/ssh -V",
+        "FOO=1 command env /usr/bin/ssh -V",
+      ]) {
+        expect(
+          yield* effectOf({ action: "shell", resources: [resource], denyResources: ["ssh -V"] }),
+          resource,
+        ).toBe("deny")
+      }
+    }),
+  )
+
+  it.effect("does not deny argument text that mentions a denied command", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "shell", resource: "ssh *", effect: "deny" }])
+      for (const resource of ["grep -r ssh .", "echo /usr/bin/ssh", "git log --grep /usr/bin/ssh"]) {
+        expect(yield* effectOf({ action: "shell", resources: [resource] }), resource).toBe("ask")
+      }
+    }),
+  )
+
+  it.effect("keeps allow and ask limited to raw spans", () =>
+    Effect.gen(function* () {
+      const saved = yield* PermissionSaved.Service
+
+      // (a) a saved allow for the path-qualified spelling never rescues a denied basename.
+      yield* setup([{ action: "shell", resource: "ssh *", effect: "deny" }])
+      yield* saved.add({ projectID: Project.ID.global, action: "shell", resources: ["./ssh *"] })
+      expect(
+        yield* effectOf({ action: "shell", resources: ["/usr/bin/ssh -V"], denyResources: ["ssh -V"] }),
+      ).toBe("deny")
+
+      // (b) a deny witness is not an allow witness: a planted `./git` cannot inherit a `git *` grant.
+      for (const item of yield* saved.list({ projectID: Project.ID.global }))
+        yield* saved.remove(item.id)
+      yield* setup([{ action: "shell", resource: "git *", effect: "allow" }])
+      yield* saved.add({ projectID: Project.ID.global, action: "shell", resources: ["git *"] })
+      expect(
+        yield* effectOf({ action: "shell", resources: ["./git status"], denyResources: ["git status"] }),
+      ).toBe("ask")
+
+      // (c) the raw span is the only allow identity.
+      for (const item of yield* saved.list({ projectID: Project.ID.global })) yield* saved.remove(item.id)
+      yield* setup()
+      yield* saved.add({ projectID: Project.ID.global, action: "shell", resources: ["./ssh *"] })
+      expect(
+        yield* effectOf({ action: "shell", resources: ["./ssh -V"], denyResources: ["ssh -V"] }),
+      ).toBe("allow")
+      expect(
+        yield* effectOf({ action: "shell", resources: ["/usr/bin/ssh -V"], denyResources: ["ssh -V"] }),
+      ).toBe("ask")
+    }),
+  )
+
+  it.effect("leaves the documented boundary forms allowed", () =>
+    Effect.gen(function* () {
+      yield* setup(fleet)
+      for (const resource of [
+        "bash -c 'ssh -V'",
+        "$(printf 's%s' sh) -V",
+        "command -v ssh",
+        "env -i ssh -V",
+        "/usr/bin/env -i ssh -V",
+        "time -p ssh -V",
+      ]) {
+        expect(yield* effectOf({ action: "shell", resources: [resource] }), resource).toBe("allow")
+      }
+    }),
+  )
+
+  it.effect('keeps "always allow" saves on the raw span', () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const resource = "/usr/bin/env ssh -V"
+      const input = {
+        action: "shell",
+        resources: [resource],
+        save: ["/usr/bin/env *"],
+        denyResources: ["ssh -V"],
+      } satisfies Partial<Permission.AssertInput>
+      const { service, fiber, request } = yield* waitForRequest(input)
+      expect(request.resources).toEqual([resource])
+      yield* service.reply({ requestID: request.id, reply: "always" })
+      yield* Fiber.join(fiber)
+
+      const saved = yield* PermissionSaved.Service
+      expect((yield* saved.list({ projectID: Project.ID.global })).map((item) => item.resource)).toEqual([
+        "/usr/bin/env *",
+      ])
+      // The Q7 hazard is pinned, not fixed: the standing grant covers the wrapper, not `ssh`.
+      expect(yield* effectOf(input)).toBe("allow")
+      expect(yield* service.list()).toEqual([])
+    }),
+  )
+
+  it.effect("honors rule order for a canonical-form allow after the deny", () =>
+    Effect.gen(function* () {
+      yield* setup([
+        { action: "shell", resource: "ssh *", effect: "deny" },
+        { action: "shell", resource: "ssh -V", effect: "allow" },
+      ])
+      expect(
+        yield* effectOf({ action: "shell", resources: ["/usr/bin/ssh -V"], denyResources: ["ssh -V"] }),
+      ).toBe("ask")
+    }),
+  )
+
+  it.effect("reports the matching variant in BlockedError resources", () =>
+    Effect.gen(function* () {
+      yield* setup(fleet)
+      const service = yield* Permission.Service
+      const blocked = yield* service
+        .assert(
+          assertion({
+            action: "shell",
+            resources: ["/usr/bin/env ssh -V"],
+            denyResources: ["ssh -V"],
+          }),
+        )
+        .pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+      if (!(blocked instanceof Permission.BlockedError)) return
+      expect(blocked.resources).toEqual(["/usr/bin/env ssh -V", "ssh -V"])
+      // Authored rule forms are unchanged, so `ssh *` sits next to both the raw span and the witness.
+      expect(blocked.rules).toEqual(fleet)
+    }),
+  )
+
+  test("keeps shell out of path actions so shell resources stay lexical", async () => {
+    const agent = await import("@opencode/core/config/plugin/agent")
+    expect(agent.pathActions).toEqual(["external_directory", "read", "edit"])
+    expect(agent.pathActions).not.toContain("shell")
+  })
+})
