@@ -444,6 +444,105 @@ describe("Permission", () => {
   }
 })
 
+describe("Permission absolutization", () => {
+  const configLocation = Layer.succeed(
+    Location.Service,
+    Location.Service.of(location({ directory: AbsolutePath.make("/config") })),
+  )
+  const projectLocation = Layer.succeed(
+    Location.Service,
+    Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
+  )
+  const planLocation = Layer.succeed(
+    Location.Service,
+    Location.Service.of(location({ directory: AbsolutePath.make("/home/user/.opencode/plan") })),
+  )
+
+  const itConfig = testEffect(
+    AppNodeBuilder.build(
+      LayerNode.group([Database.node, Bus.node, SessionStore.node, PermissionSaved.node, Agent.node, Permission.node]),
+      [Location.node.replace(configLocation)],
+    ),
+  )
+  const itProject = testEffect(
+    AppNodeBuilder.build(
+      LayerNode.group([Database.node, Bus.node, SessionStore.node, PermissionSaved.node, Agent.node, Permission.node]),
+      [Location.node.replace(projectLocation)],
+    ),
+  )
+  const itPlan = testEffect(
+    AppNodeBuilder.build(
+      LayerNode.group([Database.node, Bus.node, SessionStore.node, PermissionSaved.node, Agent.node, Permission.node]),
+      [Location.node.replace(planLocation)],
+    ),
+  )
+
+  itConfig.effect("allows internal target when an absolute allow rule matches", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }, { action: "edit", resource: "/config/**", effect: "allow" }])
+      const service = yield* Permission.Service
+      expect(yield* service.ask(assertion({ action: "edit", resources: ["agents/test.md"] }))).toMatchObject({ effect: "allow" })
+    }),
+  )
+
+  itConfig.effect("denies internal target unmatched by absolute allow rules (floor bites)", () =>
+    Effect.gen(function* () {
+      // Allow rule only matches /config/agents/**, not /config/secrets/**
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }, { action: "edit", resource: "/config/agents/**", effect: "allow" }])
+      const service = yield* Permission.Service
+      const blocked = yield* service.assert(assertion({ action: "edit", resources: ["secrets/x.txt"] })).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+    }),
+  )
+
+  itProject.effect("allows external target with absolute allow rule (regression)", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }, { action: "edit", resource: "/config/**", effect: "allow" }])
+      const service = yield* Permission.Service
+      expect(yield* service.ask(assertion({ action: "edit", resources: ["/config/agents/test.md"] }))).toMatchObject({ effect: "allow" })
+    }),
+  )
+
+  itConfig.effect("allows internal target via global floor absolute rule", () =>
+    Effect.gen(function* () {
+      // With findLast, allow rule must come AFTER deny rule to win
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }, { action: "edit", resource: "/config/**", effect: "allow" }])
+      const service = yield* Permission.Service
+      expect(yield* service.ask(assertion({ action: "edit", resources: ["agents/test.md"] }))).toMatchObject({ effect: "allow" })
+    }),
+  )
+
+  itPlan.effect("plan agent allows inside plan dir and denies outside", () =>
+    Effect.gen(function* () {
+      const planDir = "/home/user/.opencode/plan"
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }, { action: "edit", resource: `${planDir}/*`, effect: "allow" }])
+      const service = yield* Permission.Service
+      expect(yield* service.ask(assertion({ action: "edit", resources: ["work.md"] }))).toMatchObject({ effect: "allow" })
+      const blocked = yield* service.assert(assertion({ action: "edit", resources: ["../source.ts"] })).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+    }),
+  )
+
+  itProject.effect("universal '*' still matches absolutized external target", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }])
+      const service = yield* Permission.Service
+      const blocked = yield* service.assert(assertion({ action: "edit", resources: ["/elsewhere/x.ts"] })).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+    }),
+  )
+
+  itProject.effect("absolutizes relative rule consistently", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "edit", resource: "*", effect: "deny" }, { action: "edit", resource: "src/*", effect: "allow" }])
+      const service = yield* Permission.Service
+      expect(yield* service.ask(assertion({ action: "edit", resources: ["src/index.ts"] }))).toMatchObject({ effect: "allow" })
+      const blocked = yield* service.assert(assertion({ action: "edit", resources: ["other.ts"] })).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+    }),
+  )
+})
+
 describe("shell scanner permission impact", () => {
   // Fixed cases require matching outcomes; remaining differences are investigation snapshots, not contracts.
   // These service-level cases all have command resources; tool tests cover skipped checks and directories.
