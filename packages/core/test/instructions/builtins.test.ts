@@ -50,7 +50,7 @@ describe("InstructionBuiltIns", () => {
           `  Workspace root folder: ${projectDirectory}`,
           "  Is directory a git repo: yes",
           `  Platform: ${process.platform}`,
-          `  Prefer ${temporary} over generic system temporary directories such as /tmp; it is pre-created and approved for external access.`,
+          `  Prefer /repo/packages/core/.tmp/ over generic system temporary directories such as /tmp/; it is the project-local scratch root, pre-created and approved for external access.`,
           "</env>",
         ].join("\n"),
       )
