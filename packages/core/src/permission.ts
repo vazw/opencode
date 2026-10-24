@@ -12,6 +12,7 @@ import { SessionSchema } from "./session/schema.js"
 import { SessionStore } from "./session/store.js"
 import { Wildcard } from "./util/wildcard.js"
 import { PermissionSaved } from "./permission/saved.js"
+import { pathActions } from "./config/plugin/agent.js"
 import { PluginHooks } from "./plugin/hooks.js"
 
 const PermissionEffect = Permission.Effect
@@ -118,6 +119,8 @@ const layer = Layer.effect(
       if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized)) return normalized
       return normalized === "." ? slash(location.directory) : slash(path.join(location.directory, normalized))
     }
+    const absolutize = (action: string, resource: string): string =>
+      pathActions.includes(action as typeof pathActions[number]) ? absolutizeResource(resource) : resource
     const agents = yield* Agent.Service
     const sessions = yield* SessionStore.Service
     const saved = yield* PermissionSaved.Service
@@ -158,9 +161,9 @@ const layer = Layer.effect(
     })
 
     function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
-      const absRules = rules.map((rule) => ({ ...rule, resource: absolutizeResource(rule.resource) }))
+      const absRules = rules.map((rule) => ({ ...rule, resource: absolutize(rule.action, rule.resource) }))
       return input.resources.some((resource) =>
-        evaluate(input.action, absolutizeResource(resource), absRules).effect === "deny",
+        evaluate(input.action, absolutize(input.action, resource), absRules).effect === "deny",
       )
     }
 
@@ -172,9 +175,9 @@ const layer = Layer.effect(
       const rules = yield* configured(input.sessionID, input.agent)
       if (denied(input, rules)) return { effect: "deny" as const, rules }
       const all = [...rules, ...(yield* savedRules())]
-      const absAll = all.map((rule) => ({ ...rule, resource: absolutizeResource(rule.resource) }))
+      const absAll = all.map((rule) => ({ ...rule, resource: absolutize(rule.action, rule.resource) }))
       const effects = input.resources.map((resource) =>
-        evaluate(input.action, absolutizeResource(resource), absAll).effect,
+        evaluate(input.action, absolutize(input.action, resource), absAll).effect,
       )
       const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
       const event = yield* hooks.trigger("permission", "evaluate", {

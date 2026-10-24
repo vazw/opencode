@@ -541,6 +541,29 @@ describe("Permission absolutization", () => {
       expect(blocked).toBeInstanceOf(Permission.BlockedError)
     }),
   )
+
+  itConfig.effect("shell deny rules match absolute commands (no bypass)", () =>
+    Effect.gen(function* () {
+      // Deny rule for absolute command path should match
+      yield* setup([{ action: "shell", resource: "*", effect: "deny" }])
+      const service = yield* Permission.Service
+      const blocked = yield* service.assert(
+        assertion({ action: "shell", resources: ["/usr/bin/ssh -V"] })
+      ).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+    })
+  )
+
+  itConfig.effect("shell allow rules match absolute commands", () =>
+    Effect.gen(function* () {
+      // Allow rule for absolute command path should match
+      yield* setup([{ action: "shell", resource: "*", effect: "deny" }, { action: "shell", resource: "/usr/bin/ssh *", effect: "allow" }])
+      const service = yield* Permission.Service
+      expect(yield* service.ask(
+        assertion({ action: "shell", resources: ["/usr/bin/ssh -V"] })
+      )).toMatchObject({ effect: "allow" })
+    })
+  )
 })
 
 describe("shell scanner permission impact", () => {
