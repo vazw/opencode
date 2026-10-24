@@ -15,6 +15,7 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import { Shell } from "../../shell.js"
 import { ShellParse } from "../../shell/parse.js"
+import { ShellCanonical } from "../../shell/canonical.js"
 import { ShellSelect } from "../../shell/select.js"
 import { ShellResult } from "../../shell/result.js"
 
@@ -128,6 +129,10 @@ export const Plugin = {
           action: name,
           resources: parsed.commands.map((command) => command.resource),
           save: parsed.commands.map((command) => command.save),
+          // Deny witnesses only: never an allow, prompt or saved-approval identity.
+          denyResources: parsed.commands.flatMap((command) =>
+            ShellCanonical.variants(command.resource, ShellSelect.ps(invocation.shell)),
+          ),
           ...Permission.invocation(context),
         })
       // Approval can outlive the directory, so validate immediately before spawning.
