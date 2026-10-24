@@ -35,6 +35,9 @@ export type Reply = typeof Reply.Type
 export interface AssertInput extends Omit<Request, "id" | "message"> {
   readonly id?: ID
   readonly agent?: Agent.ID
+  // Deny witness only: the allow/ask phase and every prompt, save and event read `resources`.
+  // Variants exist so an allow can never be widened by a second spelling.
+  readonly denyResources?: readonly string[]
 }
 
 export interface ReplyInput {
@@ -104,6 +107,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
 interface Pending {
   readonly request: Request
   readonly agent?: Agent.ID
+  readonly denyResources?: readonly string[]
   readonly deferred: Deferred.Deferred<void, DeclinedError | CorrectedError>
 }
 
@@ -160,10 +164,18 @@ const layer = Layer.effect(
       return merge(agent?.permissions ?? missingAgentPermissions, session.permissions ?? [])
     })
 
-    function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
+    function denied(input: Pick<AssertInput, "action" | "resources" | "denyResources">, rules: Permission.Ruleset) {
       const absRules = rules.map((rule) => ({ ...rule, resource: absolutize(rule.action, rule.resource) }))
-      return input.resources.some((resource) =>
-        evaluate(input.action, absolutize(input.action, resource), absRules).effect === "deny",
+      return [...input.resources, ...(input.denyResources ?? [])].some(
+        (resource) => evaluate(input.action, absolutize(input.action, resource), absRules).effect === "deny",
+      )
+    }
+
+    // Diagnostics only, error path only: the witnesses that independently matched a deny rule.
+    function matchedDenyWitnesses(input: AssertInput, rules: Permission.Ruleset) {
+      const absRules = rules.map((rule) => ({ ...rule, resource: absolutize(rule.action, rule.resource) }))
+      return (input.denyResources ?? []).filter(
+        (resource) => evaluate(input.action, absolutize(input.action, resource), absRules).effect === "deny",
       )
     }
 
@@ -209,11 +221,11 @@ const layer = Layer.effect(
       }
     }
 
-    const create = (request: Request, agent?: Agent.ID) =>
+    const create = (request: Request, agent?: Agent.ID, denyResources?: readonly string[]) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
-          const item = { request, agent, deferred }
+          const item = { request, agent, denyResources, deferred }
           if (closed) {
             yield* Deferred.fail(deferred, new DeclinedError())
             return item
@@ -232,7 +244,7 @@ const layer = Layer.effect(
       if (closed) return { id: input.id ?? ID.create(), effect: "deny" as const }
       const result = yield* evaluateInput(input)
       const value = request(input, result.message)
-      if (result.effect === "ask") yield* create(value, input.agent)
+      if (result.effect === "ask") yield* create(value, input.agent, input.denyResources)
       return { id: value.id, effect: result.effect }
     })
 
@@ -246,12 +258,12 @@ const layer = Layer.effect(
               return yield* new BlockedError({
                 rules: relevant(input, result.rules),
                 permission: input.action,
-                resources: input.resources,
+                resources: [...input.resources, ...matchedDenyWitnesses(input, result.rules)],
                 reason: result.message,
               })
             }
             if (result.effect === "allow") return
-            const item = yield* create(request(input, result.message), input.agent)
+            const item = yield* create(request(input, result.message), input.agent, input.denyResources)
             return yield* restore(Deferred.await(item.deferred)).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
               // must not convert a user's decline into model-facing tool output. The decline
@@ -316,7 +328,11 @@ const layer = Layer.effect(
           if (input.reply !== "always" || !existing.request.save?.length) return
 
           for (const [id, item] of pending) {
-            const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
+            const result = yield* evaluateInput({
+              ...item.request,
+              agent: item.agent,
+              denyResources: item.denyResources,
+            }).pipe(
               Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
             )
             if (result?.effect !== "allow") continue

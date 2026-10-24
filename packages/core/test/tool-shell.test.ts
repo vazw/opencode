@@ -404,6 +404,42 @@ describe("ShellTool scanner permissions", () => {
         }),
       ))
 
+    test(`${scanner}: denies path-qualified, wrapper-prefixed, and assignment-prefixed spellings of a denied command`, () =>
+      withScanner(portable, (registry, fixture) =>
+        Effect.gen(function* () {
+          const agents = yield* Agent.Service
+          yield* agents.transform((editor) =>
+            editor.update(toolIdentity.agent, (agent) => {
+              // Fleet-shaped: the floor comes first and the deny row last, because `evaluate` uses findLast.
+              agent.permissions = [
+                { action: "shell", resource: "*", effect: "allow" },
+                { action: "shell", resource: "sh *", effect: "deny" },
+              ]
+            }),
+          )
+          const marker = path.join(fixture.active, "marker")
+          for (const command of [
+            // Control: the raw span already matches `sh *` before the change.
+            "sh -c 'printf x > marker'",
+            "/bin/sh -c 'printf x > marker'",
+            "env sh -c 'printf x > marker'",
+            "command sh -c 'printf x > marker'",
+            "FOO=1 /bin/sh -c 'printf x > marker'",
+            "./sh -c 'printf x > marker'",
+            "~/bin/sh -c 'printf x > marker'",
+            "$HOME/bin/sh -c 'printf x > marker'",
+          ]) {
+            const result = yield* runPermissionCommand(registry, command, marker, [])
+            expect(result.requests, command).toEqual([])
+            expect(result.exit, command).toMatchObject({
+              _tag: "Success",
+              value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
+            })
+            expect(yield* Effect.promise(() => Bun.file(marker).exists()), command).toBe(false)
+          }
+        }),
+      ))
+
     test(`${scanner}: external-directory rejection stops execution before a workspace marker is written`, () =>
       withScanner(portable, (registry, fixture) =>
         Effect.gen(function* () {

@@ -15,7 +15,6 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const global = yield* Global.Service
     const location = yield* Location.Service
     return Service.of({
       load: () =>

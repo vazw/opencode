@@ -139,6 +139,8 @@ export const Plugin = {
           action: name,
           resources: parsed.commands.map((command) => command.resource),
           save: parsed.commands.map((command) => command.save),
+          // Deny witnesses only: never an allow, prompt or saved-approval identity.
+          denyResources: parsed.commands.flatMap((command) => command.variants ?? []),
           sessionID: context.sessionID,
           agent: context.agent,
           source,

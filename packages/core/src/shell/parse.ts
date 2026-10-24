@@ -6,6 +6,7 @@ import os from "os"
 import path from "path"
 import type { Node } from "web-tree-sitter"
 import { shellParserWasm } from "#shell-parser-wasm"
+import { ShellCanonical } from "./canonical.js"
 import { ShellSelect } from "./select.js"
 import { lazy } from "../util/lazy.js"
 import { Wildcard } from "../util/wildcard.js"
@@ -16,7 +17,7 @@ const POWERSHELL_PATH_FLAG_RE =
   /^-(?:p(?:ath|at|a)?|lp|l(?:i(?:t(?:e(?:r(?:a(?:l(?:p(?:a(?:t(?:h)?)?)?)?)?)?)?)?)?)?|psp(?:a(?:t(?:h)?)?)?):?$/i
 
 export type Result = {
-  commands: Array<{ resource: string; save: string }>
+  commands: Array<{ resource: string; save: string; variants?: string[] }>
   directories: string[]
 }
 
@@ -193,13 +194,16 @@ const scanLegacy = Effect.fnUntraced(function* (command: string, shell: string, 
               result.directories.push(...directoryArgs(command, powershell, cwd, shell))
               return result
             }
+            const resource = (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
+            const variants = ShellCanonical.variants(resource, powershell)
             result.commands.push({
-              resource: (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim(),
+              resource,
               save: `${prefix(tokens).join(" ")} *`,
+              ...(variants.length > 0 ? { variants } : {}),
             })
             return result
           },
-          { commands: [] as Array<{ resource: string; save: string }>, directories: [] as string[] },
+          { commands: [] as Result["commands"], directories: [] as string[] },
         ),
       ),
     (tree) => Effect.sync(() => tree.delete()),
@@ -279,9 +283,11 @@ export const scanPortable = Effect.fnUntraced(function* (command: string, shell:
             const separator = /^\s+(?:`(?:\r\n|\r|\n)\s*)?/.exec(item.resource.slice(boundary))?.[0]
             return `${item.resource.slice(0, boundary)}${separator ?? " "}*`
           })()
+    const variants = ShellCanonical.variants(item.resource, powershell)
     output.commands.push({
       resource: item.resource,
       save,
+      ...(variants.length > 0 ? { variants } : {}),
     })
   }
   return output
