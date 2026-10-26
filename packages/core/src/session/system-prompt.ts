@@ -27,10 +27,12 @@ export function render(prompt: string, tools: string[]) {
   // Keyed on the advertised tool name, so the guidance disappears whenever todowrite is not in the snapshot.
   if (tools.includes("todowrite")) {
     instructions.push(
-      "- Use the `todowrite` tool as your working plan when a task needs 3 or more distinct steps. The user sees the list, so keep it current instead of describing the plan only in prose.",
-      "- Send the full list on every `todowrite` call; it replaces the previous list.",
-      "- Keep one item `in_progress` at a time, and mark each item `completed` as soon as it is done instead of batching completions at the end.",
-      "- Treat the list as in-session working state, not as durable record or evidence: never cite todo completion as proof. After compaction or a session reload, re-derive facts from the files.",
+      "Task Management",
+      "You have access to the `todowrite` tool to plan and track multi-step work. Use it whenever a task has three or more distinct steps, and keep it current so the user can see real progress.",
+      "- Before starting a step, mark it in_progress (exactly one at a time).",
+      "- As soon as a step is actually finished and verified, call todowrite again and mark it completed. Do this immediately, not at the end of the turn, and never batch several completions together.",
+      "- Add newly discovered work as new todos; mark work that is no longer needed cancelled.",
+      "- Do not end your turn while items you have finished are still shown as pending or in_progress.",
     )
   }
   return prompt.replace("${OPENCODE_TOOL_GUIDANCE}", instructions.join("\n"))
