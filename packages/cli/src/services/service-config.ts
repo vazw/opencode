@@ -11,6 +11,10 @@ import { RemoteTunnel } from "./remote-tunnel"
 // The CLI's service configuration file, plus the Service.EnsureOptions binding that
 // points the client package's service operations at this CLI: which
 // registration file (by channel), which version, and how to spawn opencode.
+//
+// The config file holds the private credential and lives in configDirectory(global.config), beside the
+// opencode config tree rather than inside it. The registration file stays under $XDG_STATE_HOME: clients
+// and children of the service look for it there.
 
 export const Info = Schema.Struct({
   disabled: Schema.optional(Schema.Boolean),
@@ -38,6 +42,15 @@ const decodeLegacy = Schema.decodeUnknownOption(
 )
 const decodeRegistration = Schema.decodeUnknownEffect(Schema.fromJsonString(Service.Info))
 
+// The service config holds the private credential, so the fork keeps it beside the opencode config tree
+// (<config>/opencode) instead of inside it. SERVICE_CONFIG_PATH names that directory directly, and
+// filename() still gives every channel its own file inside it.
+export function configDirectory(config: string, override = process.env.SERVICE_CONFIG_PATH) {
+  if (override === undefined) return path.join(path.dirname(config), "service")
+  if (!path.isAbsolute(override)) throw new Error(`SERVICE_CONFIG_PATH must be an absolute directory: ${override}`)
+  if (override.endsWith(".json")) throw new Error(`SERVICE_CONFIG_PATH names a directory, not a file: ${override}`)
+  return override
+}
 export function filename(channel = OPENCODE_CHANNEL) {
   if (channel === "latest" || channel === "dev" || channel === "beta" || channel === "next") return "service.json"
   return `service-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.json`
@@ -96,8 +109,16 @@ export const migrateConfig = Effect.fnUntraced(function* (legacy: string, file: 
   const text = yield* fs.readFileString(legacy).pipe(Effect.option)
   if (Option.isNone(text)) return
   if (Option.isNone(yield* decodeInfo(text.value).pipe(Effect.option))) return
+  // A relocated target directory does not exist on an existing install, so the exclusive write below needs it.
+  yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 })
   yield* fs.writeFileString(file, text.value, { flag: "wx", mode: 0o600 }).pipe(Effect.ignore)
 })
+
+// The newest generation first: earlier builds already folded a channel's hashed file into its name file,
+// and migrateConfig writes with "wx", so list order is the precedence.
+export function legacyConfigFiles(config: string, name = filename(), legacy = legacyFilename()) {
+  return [path.join(config, name), ...(legacy === undefined ? [] : [path.join(config, legacy)])]
+}
 
 function configKey(key: string): Key {
   if (
@@ -118,16 +139,17 @@ const paths = Effect.gen(function* () {
   const global = yield* Global.Service
   const name = filename()
   const legacy = legacyFilename()
+  const directory = configDirectory(global.config)
   const file = path.join(global.state, name)
   return {
     fs,
     file,
-    legacyConfigFile: legacy ? path.join(global.config, legacy) : undefined,
+    legacyConfigFiles: legacyConfigFiles(global.config, name, legacy),
     legacyRegistrationFiles: [
       ...(legacy ? [path.join(global.state, legacy)] : []),
       ...(name !== "service.json" && OPENCODE_CHANNEL !== "local" ? [path.join(global.state, "service.json")] : []),
     ],
-    configFile: path.join(global.config, name),
+    configFile: path.join(directory, name),
   }
 })
 
@@ -151,9 +173,13 @@ export const options = Effect.fnUntraced(function* (input: { readonly checkVersi
   }
 })
 
+export const configPath = Effect.fnUntraced(function* () {
+  return (yield* paths).configFile
+})
+
 export const read = Effect.fn("cli.service-config.read")(function* () {
-  const { fs, configFile, legacyConfigFile } = yield* paths
-  if (legacyConfigFile) yield* migrateConfig(legacyConfigFile, configFile)
+  const { fs, configFile, legacyConfigFiles: legacyConfigs } = yield* paths
+  yield* Effect.forEach(legacyConfigs, (legacy) => migrateConfig(legacy, configFile), { concurrency: 1 })
   const text = yield* fs.readFileString(configFile).pipe(Effect.option)
   if (Option.isNone(text)) return {} as Info
   const info = yield* decodeInfo(text.value).pipe(Effect.option)
@@ -175,7 +201,7 @@ function route() {
 const write = Effect.fn("cli.service-config.write")(function* (value: Info) {
   const { fs, configFile } = yield* paths
   const temp = configFile + "." + process.pid + ".tmp"
-  yield* fs.makeDirectory(path.dirname(configFile), { recursive: true })
+  yield* fs.makeDirectory(path.dirname(configFile), { recursive: true, mode: 0o700 })
   yield* fs.writeFileString(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
   yield* fs.rename(temp, configFile).pipe(Effect.retry({ times: 20, schedule: Schedule.spaced("10 millis") }))
 })

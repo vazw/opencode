@@ -46,7 +46,7 @@ test("managed service ports on Windows stay below the ranges Windows and WSL res
 
 test("service disabled accepts only booleans without changing configuration on invalid input", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-disabled-config-"))
-  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const layer = Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })
   const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
   try {
@@ -65,7 +65,7 @@ test("service disabled accepts only booleans without changing configuration on i
 // Enabling remote creates a real tunnel, so only the paths that stay local are covered here.
 test("service remote accepts only booleans and persists across set and unset", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-config-"))
-  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const layer = Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })
   const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
   try {
@@ -84,7 +84,7 @@ test("service remote accepts only booleans and persists across set and unset", a
 
 test("remote access route is random, stable once created, hidden, and forgotten when remote is turned off", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-route-"))
-  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const layer = Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })
   const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
   try {
@@ -111,10 +111,10 @@ test("remote access route is random, stable once created, hidden, and forgotten 
 
 test("reading a config with remote access stored as a boolean repairs it in place and keeps other settings", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-legacy-"))
-  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const layer = Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })
   const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
-  const file = path.join(root, "config", ServiceConfig.filename())
+  const file = path.join(root, "config", "service", ServiceConfig.filename())
   try {
     await fs.mkdir(path.dirname(file), { recursive: true })
 
@@ -144,14 +144,14 @@ test("local channel stores service config with the local service filename", asyn
   try {
     await Effect.runPromise(
       ServiceConfig.set("hostname", "127.0.0.2").pipe(
-        Effect.provide(Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })),
+        Effect.provide(Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })),
         Effect.provide(NodeFileSystem.layer),
       ),
     )
-    expect(await Bun.file(path.join(root, "config", "service-local.json")).json()).toEqual({
+    expect(await Bun.file(path.join(root, "config", "service", "service-local.json")).json()).toEqual({
       hostname: "127.0.0.2",
     })
-    expect(await Bun.file(path.join(root, "config", "service.json")).exists()).toBe(false)
+    expect(await Bun.file(path.join(root, "config", "service", "service.json")).exists()).toBe(false)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -159,7 +159,7 @@ test("local channel stores service config with the local service filename", asyn
 
 test("service config manages environment variables", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-env-"))
-  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const layer = Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })
   try {
     await Effect.runPromise(
       ServiceConfig.set("env", "OPENCODE_SERVICE_ENV_TEST", "configured").pipe(
@@ -189,7 +189,7 @@ test("service config manages environment variables", async () => {
         Effect.provide(NodeFileSystem.layer),
       ),
     )
-    expect(await Bun.file(path.join(root, "config", "service-local.json")).json()).toEqual({})
+    expect(await Bun.file(path.join(root, "config", "service", "service-local.json")).json()).toEqual({})
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -203,11 +203,11 @@ test("saved service environment cannot move the registration's state directory",
   })
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-env-state-"))
-  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const layer = Global.layerWith({ config: path.join(root, "config", "opencode"), state: path.join(root, "state") })
   try {
-    await fs.mkdir(path.join(root, "config"), { recursive: true })
+    await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
     await Bun.write(
-      path.join(root, "config", ServiceConfig.filename()),
+      path.join(root, "config", "service", ServiceConfig.filename()),
       JSON.stringify({ env: { XDG_STATE_HOME: path.join(root, "elsewhere"), A: "1" } }),
     )
     const options = await Effect.runPromise(
@@ -397,8 +397,8 @@ test("concurrent service processes elect one server", async () => {
   const command = [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"]
   const registration = path.join(root, "state", "opencode", "service-local.json")
   const port = await availablePort()
-  const config = path.join(root, "config", "opencode", "service-local.json")
-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  const config = path.join(root, "config", "service", "service-local.json")
+  await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
   await fs.writeFile(config, JSON.stringify({ port }))
   const processes = Array.from({ length: 10 }, () => Bun.spawn(command, { env, stderr: "pipe", stdout: "pipe" }))
 
@@ -465,8 +465,8 @@ test("configured managed service port overrides the channel default", async () =
   const port = await availablePort()
   const env = serviceEnv(root)
   const registration = path.join(root, "state", "opencode", "service-local.json")
-  const config = path.join(root, "config", "opencode", "service-local.json")
-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  const config = path.join(root, "config", "service", "service-local.json")
+  await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
   await fs.writeFile(config, JSON.stringify({ port, password: "" }))
   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
     env,
@@ -487,6 +487,56 @@ test("configured managed service port overrides the channel default", async () =
   }
 }, 30_000)
 
+test("the service reads its config from SERVICE_CONFIG_PATH when it is set", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-config-override-"))
+  const port = await availablePort()
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  const config = path.join(root, "creds", ServiceConfig.filename())
+  await fs.mkdir(path.dirname(config), { recursive: true })
+  await fs.writeFile(config, JSON.stringify({ password: "override-secret", port }))
+  const owner = Bun.spawn(
+    [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service", "--port", String(port)],
+    {
+      env: { ...serviceEnv(root), SERVICE_CONFIG_PATH: path.join(root, "creds") },
+      stderr: "pipe",
+      stdout: "ignore",
+    },
+  )
+  try {
+    const info = await waitForInfo(registration)
+    expect(info.password).toBe("override-secret")
+    expect(await Bun.file(path.join(root, "config", "service", ServiceConfig.filename())).exists()).toBe(false)
+  } finally {
+    owner.kill("SIGTERM")
+    await owner.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test("an installed service keeps its password when the config moves out of the config tree", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-config-installed-"))
+  const port = await availablePort()
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  const previous = path.join(root, "config", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.dirname(previous), { recursive: true })
+  await fs.writeFile(previous, JSON.stringify({ password: "legacy-secret", port }))
+  const owner = Bun.spawn(
+    [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service", "--port", String(port)],
+    { env: serviceEnv(root), stderr: "pipe", stdout: "ignore" },
+  )
+  try {
+    const info = await waitForInfo(registration)
+    expect(info.password).toBe("legacy-secret")
+    expect(await Bun.file(path.join(root, "config", "service", ServiceConfig.filename())).json()).toMatchObject({
+      password: "legacy-secret",
+    })
+  } finally {
+    owner.kill("SIGTERM")
+    await owner.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test.each([
   { args: [], origins: ["http://192.0.2.10:3001", "https://configured.example.com"] },
   {
@@ -497,14 +547,18 @@ test.each([
   "managed service applies CORS configuration with flag overrides: $args",
   async ({ args, origins }) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-cors-"))
-    const config = path.join(root, "config", ServiceConfig.filename())
+    const config = path.join(root, "config", "service", ServiceConfig.filename())
     const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
     const cors = ["http://192.0.2.10:3001", "https://configured.example.com"]
     await fs.mkdir(path.dirname(config), { recursive: true })
     await fs.writeFile(config, JSON.stringify({ cors }))
     const owner = Bun.spawn(
       [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service", "--port", "0", ...args],
-      { env: isolatedEnv(root), stderr: "pipe", stdout: "ignore" },
+      {
+        env: isolatedEnv(root, { OPENCODE_CONFIG_DIR: path.join(root, "config", "opencode") }),
+        stderr: "pipe",
+        stdout: "ignore",
+      },
     )
     try {
       const info = await waitForInfo(registration)
@@ -545,9 +599,9 @@ test("the original managed service contender binds when the occupied port is rel
   const port = listener.port
   if (port === undefined) throw new Error("Server did not bind a port")
   const registration = path.join(root, "state", "opencode", "service-local.json")
-  await fs.mkdir(path.join(root, "config"), { recursive: true })
+  await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
   await fs.mkdir(path.dirname(registration), { recursive: true })
-  await fs.writeFile(path.join(root, "config", "service-local.json"), JSON.stringify({ port }))
+  await fs.writeFile(path.join(root, "config", "service", "service-local.json"), JSON.stringify({ port }))
   await fs.writeFile(
     registration,
     JSON.stringify({
@@ -559,7 +613,7 @@ test("the original managed service contender binds when the occupied port is rel
     }),
   )
   const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
-    env: isolatedEnv(root),
+    env: isolatedEnv(root, { OPENCODE_CONFIG_DIR: path.join(root, "config", "opencode") }),
     stderr: "pipe",
     stdout: "ignore",
   })
@@ -614,10 +668,10 @@ test("unresponsive managed port occupancy reports a bounded conflict", async () 
     },
   })
   const registration = path.join(root, "state", "opencode", "service-local.json")
-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
   await fs.mkdir(path.dirname(registration), { recursive: true })
   await fs.writeFile(
-    path.join(root, "config", "opencode", "service-local.json"),
+    path.join(root, "config", "service", "service-local.json"),
     JSON.stringify({ port: listener.port, env: { XDG_STATE_HOME: path.join(root, "elsewhere") } }),
   )
   const stale = {
@@ -679,7 +733,7 @@ test("port contender recognizes an incumbent registered during the bind race", a
     },
   })
   const registration = path.join(root, "state", "opencode", "service-local.json")
-  const config = path.join(root, "config", "opencode", "service-local.json")
+  const config = path.join(root, "config", "service", "service-local.json")
   await fs.mkdir(path.dirname(config), { recursive: true })
   await fs.writeFile(config, JSON.stringify({ port: listener.port }))
   await fs.mkdir(path.dirname(registration), { recursive: true })
@@ -757,8 +811,8 @@ test("a failed service stays registered and owns the selected port until stopped
   const port = await availablePort()
   const database = path.join(root, "database")
   await fs.mkdir(database)
-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
-  await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
+  await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "service", "service-local.json"), JSON.stringify({ port }))
   const env = { ...serviceEnv(root), OPENCODE_DB: database }
   const command = [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"]
   const registration = path.join(root, "state", "opencode", "service-local.json")
@@ -865,9 +919,9 @@ async function startManagedService(prefix: string, failBoot = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
   const port = await availablePort()
   const registration = path.join(root, "state", "opencode", "service-local.json")
-  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.mkdir(path.join(root, "config", "service"), { recursive: true })
   if (failBoot) await fs.mkdir(path.join(root, "database"))
-  await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
+  await fs.writeFile(path.join(root, "config", "service", "service-local.json"), JSON.stringify({ port }))
   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
     env: failBoot ? { ...serviceEnv(root), OPENCODE_DB: path.join(root, "database") } : serviceEnv(root),
     stderr: "pipe",

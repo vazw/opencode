@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { ServiceConfig } from "../src/services/service-config"
 
 describe("debug paths command", () => {
   test("is included in troubleshooting help", async () => {
@@ -9,7 +10,7 @@ describe("debug paths command", () => {
 
     expect(debug.exitCode).toBe(0)
     expect(debug.stdout).toContain("paths")
-    expect(debug.stdout).toContain("Show global paths (data, config, cache, state)")
+    expect(debug.stdout).toContain("Show global paths (data, config, cache, state, service)")
     expect(paths.exitCode).toBe(0)
     expect(paths.stdout).toContain("opencode debug paths [flags]")
   })
@@ -44,6 +45,36 @@ describe("debug paths command", () => {
       })
       expect(paths.tmp).toBeTruthy()
       expect(await Bun.file(path.join(root, "state", "opencode", "service-local.json")).exists()).toBe(false)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("opencode debug paths reports the relocated service config file", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-debug-paths-service-"))
+
+    try {
+      const env = {
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        XDG_STATE_HOME: path.join(root, "state"),
+      }
+      const expected = path.join(root, "config", "service", ServiceConfig.filename())
+      const result = await cli(["debug", "paths"], env)
+      const paths = Object.fromEntries(
+        result.stdout
+          .trim()
+          .split("\n")
+          .map((line) => line.trim().split(/\s+/, 2)),
+      )
+      expect(paths.service).toBe(expected)
+
+      const selected = await cli(["debug", "paths", "service"], env)
+      expect(selected.stdout.trim()).toBe(expected)
+
+      const help = await cli(["debug", "paths", "--help"], env)
+      expect(help.stdout).toContain("service")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

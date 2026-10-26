@@ -4,12 +4,13 @@ import { Global } from "@opencode/util/global"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 import { databasePath } from "../../../database-path"
+import { ServiceConfig } from "../../../services/service-config"
 
 export default Runtime.handler(
   Commands.commands.debug.commands.paths,
   Effect.fn("cli.debug.paths")(function* (input) {
     const global = yield* Global.Service
-    const paths = { ...global, db: databasePath(global.data) }
+    const paths = { ...global, db: databasePath(global.data), service: yield* ServiceConfig.configPath() }
     if (Option.isSome(input.name)) {
       process.stdout.write(paths[input.name.value] + EOL)
       return

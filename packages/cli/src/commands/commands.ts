@@ -139,7 +139,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           },
         }),
         Spec.make("paths", {
-          description: "Show global paths (data, config, cache, state)",
+          description: "Show global paths (data, config, cache, state, service)",
           params: {
             name: Argument.Literals("name", [
               "db",
@@ -152,9 +152,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
               "bin",
               "log",
               "repos",
+              "service",
             ]).pipe(
               Argument.withDescription(
-                "Print only one path: db, home, data, config, cache, state, tmp, bin, log, repos",
+                "Print only one path: db, home, data, config, cache, state, tmp, bin, log, repos, service",
               ),
               Argument.optional,
             ),
