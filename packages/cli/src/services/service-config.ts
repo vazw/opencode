@@ -44,7 +44,7 @@ const decodeRegistration = Schema.decodeUnknownEffect(Schema.fromJsonString(Serv
 
 // The service config holds the private credential, so the fork keeps it beside the opencode config tree
 // (<config>/opencode) instead of inside it. SERVICE_CONFIG_PATH names that directory directly, and
-// filename() still gives every channel its own file inside it.
+// filename() still names the channel's file inside it.
 export function configDirectory(config: string, override = process.env.SERVICE_CONFIG_PATH) {
   if (override === undefined) return path.join(path.dirname(config), "service")
   if (!path.isAbsolute(override)) throw new Error(`SERVICE_CONFIG_PATH must be an absolute directory: ${override}`)

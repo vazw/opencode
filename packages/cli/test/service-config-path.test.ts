@@ -11,18 +11,20 @@ test("the service config directory sits beside the opencode config tree", () => 
   expect(ServiceConfig.configDirectory("/home/u/.config/opencode")).toBe("/home/u/.config/service")
   expect(ServiceConfig.configDirectory("/x/config/opencode")).toBe("/x/config/service")
   expect(
-    path.join(ServiceConfig.configDirectory("/home/u/.config/opencode"), ServiceConfig.filename("dev")),
-  ).toBe("/home/u/.config/service/service-dev.json")
+    path.join(ServiceConfig.configDirectory("/home/u/.config/opencode"), ServiceConfig.filename("local")),
+  ).toBe("/home/u/.config/service/service-local.json")
   expect(
     path.join(ServiceConfig.configDirectory("/home/u/.config/opencode"), ServiceConfig.filename("latest")),
   ).toBe("/home/u/.config/service/service.json")
+  // Released channels including dev share one service, so they share its config file.
+  expect(ServiceConfig.filename("dev")).toBe("service.json")
 })
 
 test("SERVICE_CONFIG_PATH names the config directory and replaces the derived one", () => {
   expect(ServiceConfig.configDirectory("/home/u/.config/opencode", "/srv/creds")).toBe("/srv/creds")
   expect(
-    path.join(ServiceConfig.configDirectory("/home/u/.config/opencode", "/srv/creds"), ServiceConfig.filename("dev")),
-  ).toBe("/srv/creds/service-dev.json")
+    path.join(ServiceConfig.configDirectory("/home/u/.config/opencode", "/srv/creds"), ServiceConfig.filename("local")),
+  ).toBe("/srv/creds/service-local.json")
 })
 
 test("SERVICE_CONFIG_PATH rejects a relative path and a file path", () => {
