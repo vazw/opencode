@@ -26,7 +26,7 @@ import { useToast } from "../ui/toast"
 import { TerminalPane } from "./terminal-pane"
 import { PanelHost } from "./panel-host"
 
-export function SessionFrame(props: { sessionID: string; verticalTabsWidth: number }) {
+export function SessionFrame(props: { sessionID: string; verticalTabsWidth: number; active?: boolean }) {
   const sessions = useSessionTerminals()
   const prompt = usePromptRef()
   const config = useConfig()
@@ -144,12 +144,23 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
     focusTerminal?.()
   }
   const onFocused = () => {
+    // A retained background frame must not steal the active pane when its renderable is focused.
+    if (props.active === false) return
     const current = renderer.currentFocusedRenderable
     if (rightPane() !== "sidebar" && within(current, rightNode)) setActivePane("right")
     if (!fullscreen() && within(current, sessionNode)) setActivePane("session")
   }
   renderer.on(CliRenderEvents.FOCUSED_RENDERABLE, onFocused)
   onCleanup(() => renderer.off(CliRenderEvents.FOCUSED_RENDERABLE, onFocused))
+  createEffect(
+    on(
+      () => props.active,
+      (active, previous) => {
+        if (active && previous === false && activePane() === "right") focusRightPane()
+      },
+      { defer: true },
+    ),
+  )
   createEffect(() => {
     if (fullscreen()) focusRightPane()
   })
@@ -286,15 +297,17 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
       >
         <InteractivityProvider enabled={activePane() === "session" && !fullscreen()}>
           <Session
+            sessionID={props.sessionID}
             scrollRef={(value) => (sessionScroll = value)}
             verticalTabsWidth={props.verticalTabsWidth}
-            promptMuted={activePane() !== "session"}
+            promptMuted={props.active === false || activePane() !== "session"}
             sidebarVisible={rightPane() === "sidebar"}
             onToggleSidebar={toggleSidebar}
             terminals={sessions.available()}
             visibleTerminalID={rightPane() === "terminal" ? selectedTerminal()?.id : undefined}
             onTerminalPicker={(show) => (showTerminals = show)}
             width={sessionWidth()}
+            active={props.active !== false}
           />
         </InteractivityProvider>
         <Show when={activePane() === "right"}>

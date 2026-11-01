@@ -16,6 +16,7 @@ import { newSessionLocation } from "../config/new-session-location"
 import { createSessionRetention } from "@opencode/client/solid"
 import { createProgramStatus, type PendingSession } from "./program-status"
 import { anchorKey, type AnchorTarget } from "../routes/session/anchors"
+import { createSessionRequests } from "../util/session-requests"
 import {
   closeSessionTab,
   cycleSessionTab,
@@ -150,6 +151,31 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
       const sessionID = current()
       return sessionID !== undefined && !state().tabs.some((tab) => tab.sessionID === sessionID)
     }, false)
+    // Tab badges aggregate permissions and forms across every open tab's family. Memoizing per
+    // session keeps one child's update from re-reducing every other tracked family.
+    const trackedSessionIDs = createMemo(() => {
+      const viewed = route.data.type === "session" && route.data.sessionID !== "dummy" ? current() : undefined
+      const tabs = enabled() ? state().tabs.map((tab) => tab.sessionID) : []
+      const roots = Array.from(new Set(viewed ? [...tabs, viewed] : tabs))
+      return roots.flatMap((id) => family(id))
+    })
+    const trackedSet = createMemo(() => new Set(trackedSessionIDs()))
+    const trackedPermissions = createSessionRequests(trackedSessionIDs, (id) => data.session.permission.list(id))
+    const trackedForms = createSessionRequests(trackedSessionIDs, (id) => data.session.form.list(id))
+    const permissionSessions = createMemo(() => new Set(trackedPermissions().map((item) => item.sessionID)))
+    const formSessions = createMemo(() => new Set(trackedForms().map((item) => item.sessionID)))
+    // Tracked families read the aggregated sets above; anything outside them (session search,
+    // status probes for an unopened session) falls back to a direct read.
+    const sessionAttention = (members: string[]) => {
+      if (members.some((id) => trackedSet().has(id))) {
+        if (members.some((id) => permissionSessions().has(id))) return "permission" as const
+        if (members.some((id) => formSessions().has(id))) return "question" as const
+        return false as const
+      }
+      if (members.some((id) => (data.session.permission.list(id)?.length ?? 0) > 0)) return "permission" as const
+      if (members.some((id) => (data.session.form.list(id)?.length ?? 0) > 0)) return "question" as const
+      return false as const
+    }
     const status = (sessionID: string) => {
       const session = root(sessionID)
       const members = family(session)
@@ -162,11 +188,7 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
             ? ("error" as const)
             : ("activity" as const),
         promptPulse: promptPulses()[session] ?? 0,
-        attention: members.some((id) => (data.session.permission.list(id)?.length ?? 0) > 0)
-          ? ("permission" as const)
-          : members.some((id) => (data.session.form.list(id)?.length ?? 0) > 0)
-            ? ("question" as const)
-            : (false as const),
+        attention: sessionAttention(members),
         // Parked synthetic context (user shells, plan reminders) stays pending without execution; only work counts as busy.
         busy: members.some(
           (id) =>

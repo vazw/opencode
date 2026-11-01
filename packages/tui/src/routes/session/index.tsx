@@ -88,6 +88,7 @@ import type { ProjectedPrompt } from "../../prompt/codec"
 import { deduplicateVisibleImages } from "../../prompt/attachment"
 import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
+import { createSessionRequests } from "../../util/session-requests"
 import { PermissionPrompt } from "./permission"
 import { FormPrompt } from "./form"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
@@ -148,6 +149,7 @@ const TRANSCRIPT_TAIL_ROWS = 40
 const TRANSCRIPT_BACKFILL_CHUNK = 60
 
 export function Session(props: {
+  sessionID: string
   scrollRef?: (scroll: ScrollBoxRenderable | undefined) => void
   verticalTabsWidth: number
   promptMuted?: boolean
@@ -157,6 +159,7 @@ export function Session(props: {
   visibleTerminalID?: string
   onTerminalPicker?: (show: (() => void) | undefined) => void
   width?: number
+  active?: boolean
 }) {
   const epilogue = useEpilogue()
   const clipboard = useClipboard()
@@ -166,7 +169,9 @@ export function Session(props: {
     await writeFile(file, content)
   }
   const route = useRouteData("session")
-  const sessionID = route.sessionID
+  const sessionID = props.sessionID
+  // Only the frame the router points at owns the startup prompt for the route.
+  const startupPrompt = () => (route.sessionID === sessionID ? route.prompt : undefined)
   const { navigate } = useRoute()
   const data = useData()
   const local = useLocal()
@@ -175,8 +180,8 @@ export function Session(props: {
   const config = configState.data
   const theme = useTheme()
   const promptRef = usePromptRef()
-  const session = createMemo(() => data.session.get(route.sessionID))
-  const messages = () => data.session.message.list(route.sessionID)
+  const session = createMemo(() => data.session.get(sessionID))
+  const messages = () => data.session.message.list(sessionID)
   const messageIndexes = createMemo(() => new Map(messages().map((message, index) => [message.id, index])))
   const legacy = createMemo(() => SessionTurn.legacy(messages()))
   const messagesBeforeRevert = () => {
@@ -194,33 +199,40 @@ export function Session(props: {
   const currentLocation = useLocation()
   const location = createMemo(() => session()?.location ?? currentLocation.ref)
 
-  createEffect(() => currentLocation.set(location()))
+  // A retained background frame must not hijack the foreground location or the exit banner.
+  createEffect(() => {
+    if (props.active === false) return
+    currentLocation.set(location())
+  })
 
   createEffect(() => {
+    if (props.active === false) return
     const title = Locale.truncate(session()?.title ?? "", 50)
     epilogue.session({ title, sessionID: session()?.id })
   })
   onCleanup(() => epilogue.session())
   const descendantSessionIDs = createMemo(() => {
     if (session()?.parentID) return []
-    return data.session.family(route.sessionID).filter((id) => id !== route.sessionID)
+    return data.session.family(sessionID).filter((id) => id !== sessionID)
   })
-  const permissions = createMemo(() => {
+  const familySessionIDs = createMemo(() => {
     if (session()?.parentID) return []
-    return [route.sessionID, ...descendantSessionIDs()].flatMap(
-      (sessionID) => data.session.permission.list(sessionID) ?? [],
-    )
+    return [sessionID, ...descendantSessionIDs()]
   })
+  // One memo per session: a background child's permission or form update must not re-reduce the family.
+  const familyPermissions = createSessionRequests(familySessionIDs, (sessionID) =>
+    data.session.permission.list(sessionID),
+  )
+  const permissions = createMemo(() => (session()?.parentID ? [] : familyPermissions()))
   const promptedPermissions = createMemo(() => (local.permission.mode === "autoaccept" ? [] : permissions()))
+  const familyForms = createSessionRequests(familySessionIDs, (sessionID) => data.session.form.list(sessionID))
   const forms = createMemo(() => {
     const global = data.session.form.list("global", location()) ?? []
     if (session()?.parentID) return global
-    return [route.sessionID, ...descendantSessionIDs()]
-      .flatMap((sessionID) => data.session.form.list(sessionID) ?? [])
-      .concat(global)
+    return familyForms().concat(global)
   })
   const pendingUsers = createMemo(() =>
-    data.session.pending.list(route.sessionID).flatMap((item) => (item.type === "user" ? [item] : [])),
+    data.session.pending.list(sessionID).flatMap((item) => (item.type === "user" ? [item] : [])),
   )
   const pendingDeliveries = createMemo(() => new Map(pendingUsers().map((item) => [item.id, item.delivery])))
   const queuedPrompts = createMemo(() =>
@@ -287,7 +299,7 @@ export function Session(props: {
   const editor = useEditorContext()
   const [rowsSynced, setRowsSynced] = createSignal(false)
   const rows = createSessionRows(
-    () => route.sessionID,
+    () => sessionID,
     (id) => {
       if (id === sessionID) setRowsSynced(true)
     },
@@ -340,7 +352,6 @@ export function Session(props: {
   createEffect(() => {
     if (client.connection.status() !== "connected") return
     setSynced(false)
-    const sessionID = route.sessionID
     void (async () => {
       await Promise.all([
         data.session.sync(sessionID, { children: true }),
@@ -349,15 +360,18 @@ export function Session(props: {
       ])
       const info = data.session.get(sessionID)
       if (!info) {
-        toast.show({
-          message: `Session not found: ${sessionID}`,
-          variant: "error",
-          duration: 5000,
-        })
-        sessionTabs.enabled() ? sessionTabs.close(sessionID) : navigate({ type: "home" })
+        if (route.sessionID === sessionID) {
+          toast.show({
+            message: `Session not found: ${sessionID}`,
+            variant: "error",
+            duration: 5000,
+          })
+          sessionTabs.enabled() ? sessionTabs.close(sessionID) : navigate({ type: "home" })
+        }
         return
       }
-      editor.reconnect(info.location.directory)
+      // The editor connection belongs to the session the reader is looking at.
+      if (props.active !== false) editor.reconnect(info.location.directory)
       setSynced(true)
     })().catch((error) => {
       if (route.sessionID !== sessionID) return
@@ -393,11 +407,45 @@ export function Session(props: {
   const [prompt, setPrompt] = createSignal<PromptRef>()
   const bind = (r: PromptRef | undefined) => {
     setPrompt(r)
-    promptRef.set(r)
-    if (seeded || !route.prompt || !r) return
+    // Only the visible frame owns the shared prompt ref; a retained background frame must not
+    // publish its composer while the reader is elsewhere. Activation re-registers it below.
+    if (props.active !== false) promptRef.set(r)
+    const startup = startupPrompt()
+    if (seeded || !startup || !r) return
     seeded = true
-    r.set(route.prompt)
+    r.set(startup)
   }
+  // Refocus through the local prompt signal: a parent effect reading this frame's ref would run
+  // before the child binds its composer and focus a stale prompt from another frame.
+  createEffect(
+    on(
+      () => props.active,
+      (active, previous) => {
+        if (!active || previous !== false) return
+        const currentPrompt = prompt()
+        if (!currentPrompt) return
+        promptRef.set(currentPrompt)
+        currentPrompt.focus()
+      },
+      { defer: true },
+    ),
+  )
+  // Keep the reader where they were: content can arrive while the frame is hidden, so the stored
+  // anchor is re-applied when this session comes back to the front.
+  createEffect(
+    on(
+      () => props.active,
+      (active, previous) => {
+        if (previous === undefined) return
+        if (active === false) {
+          saveScrollAnchor()
+          return
+        }
+        if (!restored || !scroll || scroll.isDestroyed) return
+        restoreScrollPosition()
+      },
+    ),
+  )
 
   /** Runs after the next frame's layout and before it paints, unless the transcript was torn down. */
   const afterLayout = (continuation: () => void) => {
@@ -435,11 +483,11 @@ export function Session(props: {
   const visibleEnd = createMemo(() => Math.max(hidden(), Math.min(visibleRowsEnd() ?? rows.length, rows.length)))
   const visibleRows = createMemo(() => rows.slice(hidden(), visibleEnd()))
   const prependHistory = createHistoryPrepend({
-    sessionID: () => route.sessionID,
+    sessionID: () => sessionID,
     more: (id) => data.session.message.more(id),
     loadMore: async (id) => {
       const beforePublish = () => {
-        if (route.sessionID === id) pinAbove()
+        if (props.active !== false) pinAbove()
       }
       await data.session.message.loadMore(id, { beforePublish })
       await completeGroupBoundary({
@@ -447,11 +495,11 @@ export function Session(props: {
         messages: () => data.session.message.list(id).length,
         more: () => data.session.message.more(id),
         loadMore: () => data.session.message.loadMore(id, { beforePublish }),
-        active: () => route.sessionID === id,
+        active: () => props.active !== false,
       })
     },
     afterLayout,
-    active: (id) => route.sessionID === id && Boolean(scroll && !scroll.isDestroyed),
+    active: () => props.active !== false && Boolean(scroll && !scroll.isDestroyed),
     scrollBy: (amount) => {
       scroll.scrollBy(amount)
       updateAwayFromBottom()
@@ -625,7 +673,7 @@ export function Session(props: {
     const current = prompt()
     if (sent || !current || !synced() || !local.model.ready || !local.model.catalogReady) return
     if (!local.agent.current() || !local.model.current()) return
-    if (!args.prompt || route.prompt?.text !== args.prompt || current.current.text !== args.prompt) return
+    if (!args.prompt || startupPrompt()?.text !== args.prompt || current.current.text !== args.prompt) return
     sent = true
     current.submit()
   })
@@ -639,7 +687,7 @@ export function Session(props: {
     { initial: {} },
   )
   const handledLimits = new Set<string>()
-  useUsageAlerts(() => route.sessionID)
+  useUsageAlerts(() => sessionID)
   let sessionDisposed = false
   onCleanup(() => {
     sessionDisposed = true
@@ -649,7 +697,7 @@ export function Session(props: {
   onCleanup(
     data.on("session.step.failed", async (event) => {
       const type = event.data.error.type
-      if (event.data.sessionID !== route.sessionID) return
+      if (event.data.sessionID !== sessionID) return
       if (type !== "provider.free-limit" && type !== "provider.go-limit") return
       if (handledLimits.has(event.data.assistantMessageID)) return
       handledLimits.add(event.data.assistantMessageID)
@@ -667,7 +715,7 @@ export function Session(props: {
       for (let i = end - 1; i >= 0 && !recalled; i--) {
         const item = list[i]
         if (!item || item.type === "shell" || item.type === "idle") break
-        if (item.type === "user" && !data.session.input.has(route.sessionID, item.id)) recalled = item
+        if (item.type === "user" && !data.session.input.has(sessionID, item.id)) recalled = item
       }
       const restored = recalled
         ? await restorePrompt(recalled).catch((error) => {
@@ -676,7 +724,7 @@ export function Session(props: {
           })
         : undefined
       // Media refs load before the prompt comes back; typing or a shell command meanwhile keeps it and skips the offer.
-      if (restored === null || sessionDisposed || route.sessionID !== event.data.sessionID) return
+      if (restored === null || sessionDisposed || sessionID !== event.data.sessionID) return
       const current = prompt()
       if (!empty(current) || current.mode !== "normal") return
       if (restored) current.set(restored)
@@ -694,7 +742,7 @@ export function Session(props: {
         const active = prompt()
         return Boolean(
           !sessionDisposed &&
-            route.sessionID === event.data.sessionID &&
+            sessionID === event.data.sessionID &&
             active &&
             active.current.text === expectedText &&
             (active.current.files?.length ?? 0) === expectedFiles &&
@@ -759,7 +807,7 @@ export function Session(props: {
     }),
   )
   const runPendingAction = createSingleFlight<string>()
-  // Uses the captured sessionID: after an await, route.sessionID may already name another tab, or none.
+  // Uses the captured sessionID: after an await, sessionID may already name another tab, or none.
   const requestPending = async (action: PendingAction, inboxID: string, failureLabel?: string) => {
     const request =
       action === "steer"
@@ -878,7 +926,7 @@ export function Session(props: {
         dialog.clear()
         return
       }
-      if (direction === "prev" && data.session.message.more(route.sessionID)) {
+      if (direction === "prev" && data.session.message.more(sessionID)) {
         prependHistory(0, () => scrollToMessage(direction, dialog, userOnly))
         return
       }
@@ -890,7 +938,7 @@ export function Session(props: {
       const child = anchors.forMessage(messageID)
       if (!child) return
       const y = scroll.scrollTop + child.node.y - scroll.viewport.y
-      const message = data.session.message.get(route.sessionID, messageID)
+      const message = data.session.message.get(sessionID, messageID)
       alignMessage(messageID, Math.max(0, y - (message?.type === "assistant" ? 1 : 0)))
     })
 
@@ -900,7 +948,7 @@ export function Session(props: {
     if (awayTimer) clearTimeout(awayTimer)
     awayTimer = undefined
     setAwayFromBottom(false)
-    sessionTabs.setScrollAnchor(route.sessionID, undefined)
+    sessionTabs.setScrollAnchor(sessionID, undefined)
     setHiddenRows(undefined)
     setVisibleRowsEnd(undefined)
     setTimeout(() => {
@@ -1009,7 +1057,7 @@ export function Session(props: {
             setVisibleRowsEnd(visibleEnd())
           })
           void data.session.message
-            .loadMore(route.sessionID, {
+            .loadMore(sessionID, {
               all: true,
               signal: request.signal,
               beforePublish: commit,
@@ -1058,12 +1106,12 @@ export function Session(props: {
       group: "Session",
       slash: { name: "rename", arguments: true as const },
       run: (input?: string) => {
-        if (input === undefined) return DialogSessionRename.show(dialog, route.sessionID, session()?.title)
+        if (input === undefined) return DialogSessionRename.show(dialog, sessionID, session()?.title)
         const title = input.trim()
         void (
           title
-            ? client.api.session.update({ sessionID: route.sessionID, title })
-            : data.session.title.generate(route.sessionID)
+            ? client.api.session.update({ sessionID: sessionID, title })
+            : data.session.title.generate(sessionID)
         ).catch((error) => toast.error(error))
       },
     },
@@ -1073,7 +1121,7 @@ export function Session(props: {
       group: "Session",
       slash: { name: "timeline" },
       run: () => {
-        dialog.replace(() => <DialogTimeline sessionID={route.sessionID} onMove={jumpToMessage} />)
+        dialog.replace(() => <DialogTimeline sessionID={sessionID} onMove={jumpToMessage} />)
       },
     },
     {
@@ -1084,7 +1132,7 @@ export function Session(props: {
       run: () => {
         dialog.replace(() => (
           <DialogFork
-            sessionID={route.sessionID}
+            sessionID={sessionID}
             onMove={(messageID) => {
               if (!messageID) return
               jumpToMessage(messageID)
@@ -1104,7 +1152,7 @@ export function Session(props: {
         const selection = local.model.current()
         void data.session
           .compact({
-            sessionID: route.sessionID,
+            sessionID: sessionID,
             model: selection
               ? {
                   providerID: selection.providerID,
@@ -1152,7 +1200,7 @@ export function Session(props: {
       slash: { name: "redo" },
       run: () => {
         void (async () => {
-          const error = await client.api.session.revert.clear({ sessionID: route.sessionID }).then(
+          const error = await client.api.session.revert.clear({ sessionID: sessionID }).then(
             () => undefined,
             (error) => error,
           )
@@ -1228,7 +1276,7 @@ export function Session(props: {
       group: "Session",
       palette: undefined,
       run: () => {
-        const messages = data.session.message.list(route.sessionID)
+        const messages = data.session.message.list(sessionID)
         if (!messages || !messages.length) return
 
         // Find the most recent user message with non-ignored, non-synthetic text parts
@@ -1319,7 +1367,7 @@ export function Session(props: {
       group: "Session",
       run: () => {
         clipboard
-          .write(route.sessionID)
+          .write(sessionID)
           .then(() => toast.show({ message: "Session ID copied to clipboard!", variant: "success" }))
           .catch(() => toast.show({ message: "Failed to copy session ID", variant: "error" }))
         dialog.clear()
@@ -1393,7 +1441,7 @@ export function Session(props: {
       group: "Session",
       palette: undefined,
       run: () => {
-        void client.api.session.background({ sessionID: route.sessionID })
+        void client.api.session.background({ sessionID: sessionID })
         dialog.clear()
       },
     },
@@ -1460,13 +1508,16 @@ export function Session(props: {
     bindings: [...baseAndUnfocusedCommands, ...baseCommands()].map((command) => command.id),
   }))
 
+  // A retained frame keeps its state while hidden; only in-view navigation state is dropped.
   createEffect(
     on(
-      () => route.sessionID,
-      () => {
+      () => props.active,
+      (active) => {
+        if (active !== false) return
         setComposer("open", false)
         clearMessageNavigation()
       },
+      { defer: true },
     ),
   )
 
@@ -1500,7 +1551,7 @@ export function Session(props: {
             return terminalHeight()
           },
         },
-        sessionID: route.sessionID,
+        sessionID: sessionID,
         thinkingMode,
         markdownMode,
         groupExploration,
@@ -1555,7 +1606,7 @@ export function Session(props: {
                   {(row, index) => (
                     <SessionRowView
                       row={row}
-                      message={(messageID) => data.session.message.get(route.sessionID, messageID)}
+                      message={(messageID) => data.session.message.get(sessionID, messageID)}
                       boundaryID={boundaries()[index() + hidden()]}
                     />
                   )}
@@ -1596,9 +1647,9 @@ export function Session(props: {
               <Show when={!composer.open && !disabled() && queuedPrompts().length > 0}>
                 <QueuedPromptDock prompts={queuedPrompts()} onOpen={openQueuedPrompts} />
               </Show>
-              <Slot path="session.composer.top" input={{ sessionID: route.sessionID }} />
+              <Slot path="session.composer.top" input={{ sessionID: sessionID }} />
               <Composer
-                sessionID={route.sessionID}
+                sessionID={sessionID}
                 open={composer.open || (!!session()?.parentID && forms().length === 0)}
                 defaultTab={composer.tab ?? (session()?.parentID ? "subagents" : undefined)}
                 onClose={() => {
@@ -1641,7 +1692,7 @@ export function Session(props: {
                   <SessionLocationMissing
                     directory={session()!.location.directory}
                     projectID={session()!.projectID}
-                    sessionID={route.sessionID}
+                    sessionID={sessionID}
                   />
                 </Match>
                 <Match when={!disabled()}>
@@ -1657,7 +1708,7 @@ export function Session(props: {
                       if (!next) return false
                       return mutatePending("steer", next.id)
                     }}
-                    sessionID={route.sessionID}
+                    sessionID={sessionID}
                   />
                 </Match>
               </Switch>
@@ -2263,7 +2314,7 @@ function RevertMessage(props: {
 }) {
   const ctx = use()
   const theme = useTheme()
-  const route = useRouteData("session")
+  const sessionID = useRouteData("session").sessionID
   const client = useClient()
   const toast = useToast()
   const renderer = useRenderer()
@@ -2276,7 +2327,7 @@ function RevertMessage(props: {
       onMouseUp={() => {
         if (renderer.getSelection()?.getSelectedText()) return
         void (async () => {
-          const error = await client.api.session.revert.clear({ sessionID: route.sessionID }).then(
+          const error = await client.api.session.revert.clear({ sessionID: sessionID }).then(
             () => undefined,
             (error) => error,
           )

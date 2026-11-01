@@ -32,6 +32,7 @@ import {
   onMount,
   onCleanup,
   batch,
+  For,
   Show,
 } from "solid-js"
 import {
@@ -102,6 +103,7 @@ import { localPluginDirectories } from "./plugin/discovery"
 import { PluginRoute, Slot } from "./plugin/render"
 import { CommandPaletteDialog } from "./component/command-palette"
 import { COMMAND_PALETTE_COMMAND, Keymap, type KeymapCommand } from "./context/keymap"
+import { InteractivityProvider } from "./context/interactivity"
 
 import { DialogVariant } from "./component/dialog-variant"
 import { destroyRenderer, setTerminalTitle } from "./util/renderer"
@@ -619,6 +621,26 @@ function App() {
     panels.presentation() === "fullscreen"
   const tabsVisible = () => tabsAvailable() && !fullscreenPanel()
   const verticalTabsVisible = () => tabsVisible() && tabsVertical()
+
+  // Session frames stay mounted across switches so returning to a session reuses its rendered
+  // transcript instead of rebuilding rows and re-parsing markdown. Retention is bounded: every
+  // open tab plus the three most recently visited non-tab sessions, least recently used first out.
+  let recentSessions: string[] = []
+  let retainedKeep = new Set<string>()
+  const retainedSessionIDs = createMemo(() => {
+    const currentSessionID = route.data.type === "session" ? route.data.sessionID : undefined
+    const keep = new Set(sessionTabs.enabled() ? sessionTabs.tabs().map((tab) => tab.sessionID) : [])
+    // Closing a tab releases its frame now rather than after the recent window rolls past it.
+    const closed = [...retainedKeep].filter((id) => !keep.has(id))
+    if (closed.length > 0) recentSessions = recentSessions.filter((id) => !closed.includes(id))
+    retainedKeep = keep
+    if (currentSessionID) {
+      recentSessions = [currentSessionID, ...recentSessions.filter((id) => id !== currentSessionID)]
+    }
+    const nonTabRecent = recentSessions.filter((id) => !keep.has(id)).slice(0, 3)
+    recentSessions = [...keep, ...nonTabRecent]
+    return Array.from(new Set([...keep, ...nonTabRecent, ...(currentSessionID ? [currentSessionID] : [])]))
+  })
 
   // Measure the prospective split layout, even while full-screen hides the tabs.
   createEffect(() => panels.setWidth(dimensions().width - (tabsAvailable() && tabsVertical() ? tabsResize.size() : 0)))
@@ -1444,14 +1466,34 @@ function App() {
                   <Home />
                 </Match>
                 <Match when={route.data.type === "session"}>
-                  <Show when={route.data.type === "session" ? route.data.sessionID : undefined} keyed>
-                    {(sessionID) => (
-                      <SessionFrame
-                        sessionID={sessionID}
-                        verticalTabsWidth={verticalTabsVisible() ? tabsResize.size() : 0}
-                      />
-                    )}
-                  </Show>
+                  <For each={retainedSessionIDs()}>
+                    {(sessionID) => {
+                      const active = () => route.data.type === "session" && route.data.sessionID === sessionID
+                      return (
+                        <InteractivityProvider enabled={active()}>
+                          <box
+                            flexGrow={1}
+                            minWidth={0}
+                            minHeight={0}
+                            position={active() ? "relative" : "absolute"}
+                            // A detached frame keeps the session region's size so hiding it does not
+                            // re-lay-out the transcript and move the reader's scroll position.
+                            left={active() ? undefined : 0}
+                            top={active() ? undefined : 0}
+                            width={active() ? undefined : "100%"}
+                            height={active() ? undefined : "100%"}
+                            visible={active()}
+                          >
+                            <SessionFrame
+                              sessionID={sessionID}
+                              verticalTabsWidth={verticalTabsVisible() ? tabsResize.size() : 0}
+                              active={active()}
+                            />
+                          </box>
+                        </InteractivityProvider>
+                      )
+                    }}
+                  </For>
                 </Match>
                 <Match when={route.data.type === "plugin"}>
                   <PluginRoute
