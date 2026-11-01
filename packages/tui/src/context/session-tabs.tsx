@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, on, onCleanup, untrack } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useKeyboard, useRenderer } from "@opentui/solid"
 import { isDeepEqual } from "remeda"
@@ -17,6 +17,7 @@ import { createSessionRetention } from "@opencode/client/solid"
 import { createProgramStatus, type PendingSession } from "./program-status"
 import { anchorKey, type AnchorTarget } from "../routes/session/anchors"
 import { createSessionRequests } from "../util/session-requests"
+import { pollableSessionIDs } from "../util/session-polling"
 import {
   closeSessionTab,
   cycleSessionTab,
@@ -138,12 +139,30 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
       unread: {},
     })
     const current = () => (route.data.type === "session" ? root(route.data.sessionID) : undefined)
+    // Frames and transcripts share one budget, ordered by navigation recency: the routed session
+    // first, then the last visited sessions, tabs or not. Tab-bar position must never decide
+    // survival, or a ping-pong between two tabs past the first slots pays a cold remount each way.
+    // Three slots with more than three tabs means some tabs are cold by design.
+    const RETAINED_FRAMES = 3
+    let recentFrames: string[] = []
+    let previousTabs: string[] = []
+    const retainedFrames = createMemo(() => {
+      const viewed = route.data.type === "session" ? route.data.sessionID : undefined
+      const tabs = enabled() ? state().tabs.map((tab) => tab.sessionID) : []
+      // A closed tab releases its frame now rather than after the recent window rolls past it.
+      const closed = previousTabs.filter((id) => !tabs.includes(id))
+      previousTabs = tabs
+      if (closed.length > 0) recentFrames = recentFrames.filter((id) => !closed.includes(id))
+      if (viewed) recentFrames = [viewed, ...recentFrames.filter((id) => id !== viewed)]
+      recentFrames = recentFrames.slice(0, RETAINED_FRAMES)
+      return Array.from(new Set([...(viewed ? [viewed] : []), ...recentFrames])).slice(0, RETAINED_FRAMES)
+    })
     createSessionRetention({
       session: data.session,
       current: () =>
         route.data.type === "session" && route.data.sessionID !== "dummy" ? route.data.sessionID : undefined,
-      keep: () => (enabled() ? state().tabs.map((tab) => tab.sessionID) : []),
-      limit: 3,
+      keep: retainedFrames,
+      limit: 0,
     })
     const newTab = createMemo((open = false) => {
       if (route.data.type === "home") return true
@@ -153,15 +172,26 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
     }, false)
     // Tab badges aggregate permissions and forms across every open tab's family. Memoizing per
     // session keeps one child's update from re-reducing every other tracked family.
-    const trackedSessionIDs = createMemo(() => {
+    const trackedRoots = createMemo(() => {
       const viewed = route.data.type === "session" && route.data.sessionID !== "dummy" ? current() : undefined
       const tabs = enabled() ? state().tabs.map((tab) => tab.sessionID) : []
-      const roots = Array.from(new Set(viewed ? [...tabs, viewed] : tabs))
-      return roots.flatMap((id) => family(id))
+      return Array.from(new Set(viewed ? [...tabs, viewed] : tabs))
     })
+    // Every family member stays "tracked" for the attention check below: an excluded member is
+    // provably silent, so its answer comes from the aggregated sets instead of a per-child read.
+    const trackedSessionIDs = createMemo(() => trackedRoots().flatMap((id) => family(id)))
     const trackedSet = createMemo(() => new Set(trackedSessionIDs()))
-    const trackedPermissions = createSessionRequests(trackedSessionIDs, (id) => data.session.permission.list(id))
-    const trackedForms = createSessionRequests(trackedSessionIDs, (id) => data.session.form.list(id))
+    const polledSessionIDs = createMemo(() =>
+      pollableSessionIDs({
+        include: trackedRoots(),
+        candidates: trackedSessionIDs(),
+        running: data.session.active(),
+        pending: [...data.session.permission.sessions(), ...data.session.form.sessions()],
+        info: (id) => untrack(() => data.session.get(id)),
+      }),
+    )
+    const trackedPermissions = createSessionRequests(polledSessionIDs, (id) => data.session.permission.list(id))
+    const trackedForms = createSessionRequests(polledSessionIDs, (id) => data.session.form.list(id))
     const permissionSessions = createMemo(() => new Set(trackedPermissions().map((item) => item.sessionID)))
     const formSessions = createMemo(() => new Set(trackedForms().map((item) => item.sessionID)))
     // Tracked families read the aggregated sets above; anything outside them (session search,
@@ -399,6 +429,9 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
       enabled,
       tabs() {
         return state().tabs
+      },
+      retainedFrames() {
+        return retainedFrames()
       },
       recentlyClosed() {
         return closedTabs()

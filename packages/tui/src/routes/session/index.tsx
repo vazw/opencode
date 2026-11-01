@@ -10,6 +10,7 @@ import {
   onCleanup,
   Show,
   Switch,
+  untrack,
   type Accessor,
 } from "solid-js"
 import path from "node:path"
@@ -89,6 +90,7 @@ import { deduplicateVisibleImages } from "../../prompt/attachment"
 import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
 import { createSessionRequests } from "../../util/session-requests"
+import { pollableSessionIDs } from "../../util/session-polling"
 import { PermissionPrompt } from "./permission"
 import { FormPrompt } from "./form"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
@@ -215,10 +217,19 @@ export function Session(props: {
     if (session()?.parentID) return []
     return data.session.family(sessionID).filter((id) => id !== sessionID)
   })
-  const familySessionIDs = createMemo(() => {
-    if (session()?.parentID) return []
-    return [sessionID, ...descendantSessionIDs()]
-  })
+  // Only children that can still ask for input are polled: running ones, ones already holding a
+  // request, and a bounded tail of the newest. A monster session's idle subagents stay out.
+  const polledSessionIDs = createMemo(() =>
+    pollableSessionIDs({
+      include: [sessionID],
+      candidates: descendantSessionIDs(),
+      running: data.session.active(),
+      pending: [...data.session.permission.sessions(), ...data.session.form.sessions()],
+      // Untracked: a tracked read would recreate one store subscription per child.
+      info: (id) => untrack(() => data.session.get(id)),
+    }),
+  )
+  const familySessionIDs = createMemo(() => (session()?.parentID ? [] : polledSessionIDs()))
   // One memo per session: a background child's permission or form update must not re-reduce the family.
   const familyPermissions = createSessionRequests(familySessionIDs, (sessionID) =>
     data.session.permission.list(sessionID),
@@ -341,12 +352,18 @@ export function Session(props: {
   )
 
   createEffect(
-    on([descendantSessionIDs, () => client.connection.status()], ([sessionIDs, status]) => {
-      if (status !== "connected") return
-      void Promise.allSettled(
-        sessionIDs.flatMap((sessionID) => [data.session.permission.sync(sessionID), data.session.form.sync(sessionID)]),
-      )
-    }),
+    on(
+      [
+        createMemo(() => polledSessionIDs().filter((id) => id !== sessionID)),
+        () => client.connection.status(),
+      ],
+      ([sessionIDs, status]) => {
+        if (status !== "connected") return
+        void Promise.allSettled(
+          sessionIDs.flatMap((sessionID) => [data.session.permission.sync(sessionID), data.session.form.sync(sessionID)]),
+        )
+      },
+    ),
   )
 
   createEffect(() => {

@@ -623,24 +623,9 @@ function App() {
   const verticalTabsVisible = () => tabsVisible() && tabsVertical()
 
   // Session frames stay mounted across switches so returning to a session reuses its rendered
-  // transcript instead of rebuilding rows and re-parsing markdown. Retention is bounded: every
-  // open tab plus the three most recently visited non-tab sessions, least recently used first out.
-  let recentSessions: string[] = []
-  let retainedKeep = new Set<string>()
-  const retainedSessionIDs = createMemo(() => {
-    const currentSessionID = route.data.type === "session" ? route.data.sessionID : undefined
-    const keep = new Set(sessionTabs.enabled() ? sessionTabs.tabs().map((tab) => tab.sessionID) : [])
-    // Closing a tab releases its frame now rather than after the recent window rolls past it.
-    const closed = [...retainedKeep].filter((id) => !keep.has(id))
-    if (closed.length > 0) recentSessions = recentSessions.filter((id) => !closed.includes(id))
-    retainedKeep = keep
-    if (currentSessionID) {
-      recentSessions = [currentSessionID, ...recentSessions.filter((id) => id !== currentSessionID)]
-    }
-    const nonTabRecent = recentSessions.filter((id) => !keep.has(id)).slice(0, 3)
-    recentSessions = [...keep, ...nonTabRecent]
-    return Array.from(new Set([...keep, ...nonTabRecent, ...(currentSessionID ? [currentSessionID] : [])]))
-  })
+  // transcript instead of rebuilding rows and re-parsing markdown. Frames and their client
+  // transcripts share one bounded, navigation-ordered budget from the tabs context.
+  const retainedSessionIDs = sessionTabs.retainedFrames
 
   // Measure the prospective split layout, even while full-screen hides the tabs.
   createEffect(() => panels.setWidth(dimensions().width - (tabsAvailable() && tabsVertical() ? tabsResize.size() : 0)))

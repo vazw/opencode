@@ -644,6 +644,48 @@ test("distinguishes family questions and permissions without clearing them on se
   }
 })
 
+test("keeps attention until every idle child's request is answered", async () => {
+  const children = Array.from({ length: 8 }, (_, index) => `ses_c${index}`)
+  const setup = await renderSessionTabs("root", {
+    home: true,
+    persisted: ["root"],
+    sessionParents: Object.fromEntries(children.map((id) => [id, "root"])),
+    sessionTimes: Object.fromEntries(children.map((id) => [id, { idle: 1 }])),
+  })
+  try {
+    await wait(() => children.every((id) => setup.data.session.get(id) !== undefined))
+    expect(setup.tabs.status("root").attention).toBe(false)
+
+    children.forEach((id, index) =>
+      setup.emit({
+        id: `evt_asked_${id}`,
+        created: index + 1,
+        type: "permission.asked",
+        data: { id: `per_${id}`, sessionID: id, action: "shell", resources: ["bun test"] },
+      }),
+    )
+    await wait(() => setup.tabs.status("root").attention === "permission")
+
+    // Replies run in forward child order: the children past the polled tail come last, so a tracker
+    // that drops children holding a request clears attention before the queue is actually empty.
+    for (const [index, id] of children.entries()) {
+      setup.emit({
+        id: `evt_replied_${id}`,
+        created: 100 + index,
+        type: "permission.replied",
+        data: { sessionID: id, requestID: `per_${id}`, reply: "once" },
+      })
+      // Wait for this reply to land before sending the next one; otherwise every assertion below
+      // reads the state of the previous reply and a lost child stays invisible.
+      await wait(() => (setup.data.session.permission.list(id)?.length ?? 0) === 0, 2_000, `reply ${id}`)
+      const last = index === children.length - 1
+      expect(setup.tabs.status("root").attention).toBe(last ? false : "permission")
+    }
+  } finally {
+    await setup.destroy()
+  }
+})
+
 test("concurrent TUIs do not alternate shared tab titles from divergent session caches", async () => {
   await using temporary = await tmpdir()
   const state = temporary.path
