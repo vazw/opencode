@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test"
 import type { SessionMessageAssistant, SessionMessageInfo } from "@opencode/client"
-import { findMessageBoundary, messageNavigationSlack } from "../../../src/routes/session/message-navigation"
+import {
+  findMessageBoundary,
+  messageNavigationSlack,
+  scrollRestoreStep,
+  type ScrollRestoreStep,
+} from "../../../src/routes/session/message-navigation"
 
 const messages: SessionMessageInfo[] = [
   { type: "user", id: "user-1", text: "First", time: { created: 0 } },
@@ -162,3 +167,118 @@ function assistant(id: string, text: string): SessionMessageAssistant {
     time: { created: 1, completed: 1 },
   }
 }
+
+// Every input is pinned so the expected action is unambiguous under the rule order. `target` is
+// always 0 where `boundary` is false: the helper must not read it on that path.
+test("restore_retries_when_the_anchor_renderable_is_not_registered", () => {
+  expect(
+    scrollRestoreStep({
+      target: 0,
+      scrollTop: 1,
+      scrollHeight: 22,
+      viewportHeight: 21,
+      currentSlack: 0,
+      boundary: false,
+      moreRows: false,
+      attempts: 1,
+      maxAttempts: 8,
+    }),
+  ).toEqual({ action: "retry" } satisfies ScrollRestoreStep)
+})
+
+test("restore_derives_slack_when_the_anchor_is_beyond_the_maximum", () => {
+  expect(
+    scrollRestoreStep({
+      target: 13,
+      scrollTop: 1,
+      scrollHeight: 22,
+      viewportHeight: 21,
+      currentSlack: 0,
+      boundary: true,
+      moreRows: false,
+      attempts: 3,
+      maxAttempts: 8,
+    }),
+  ).toEqual({ action: "grow-slack", slack: 12 } satisfies ScrollRestoreStep)
+})
+
+test("restore_derives_slack_against_the_mounted_slack", () => {
+  expect(
+    scrollRestoreStep({
+      target: 20,
+      scrollTop: 13,
+      scrollHeight: 34,
+      viewportHeight: 21,
+      currentSlack: 12,
+      boundary: true,
+      moreRows: false,
+      attempts: 2,
+      maxAttempts: 8,
+    }),
+  ).toEqual({ action: "grow-slack", slack: 19 } satisfies ScrollRestoreStep)
+})
+
+test("restore_grows_rows_before_slack", () => {
+  expect(
+    scrollRestoreStep({
+      target: 13,
+      scrollTop: 1,
+      scrollHeight: 22,
+      viewportHeight: 21,
+      currentSlack: 0,
+      boundary: true,
+      moreRows: true,
+      attempts: 2,
+      maxAttempts: 8,
+    }),
+  ).toEqual({ action: "grow-rows" } satisfies ScrollRestoreStep)
+})
+
+test("restore_scrolls_when_the_target_is_reachable_but_not_applied", () => {
+  expect(
+    scrollRestoreStep({
+      target: 9,
+      scrollTop: 13,
+      scrollHeight: 34,
+      viewportHeight: 21,
+      currentSlack: 12,
+      boundary: true,
+      moreRows: false,
+      attempts: 4,
+      maxAttempts: 8,
+    }),
+  ).toEqual({ action: "scroll", scrollTop: 9 } satisfies ScrollRestoreStep)
+})
+
+test("restore_settles_when_already_aligned", () => {
+  expect(
+    scrollRestoreStep({
+      target: 13,
+      scrollTop: 13,
+      scrollHeight: 34,
+      viewportHeight: 21,
+      currentSlack: 12,
+      boundary: true,
+      moreRows: false,
+      attempts: 4,
+      maxAttempts: 8,
+    }),
+  ).toEqual({ action: "settle" } satisfies ScrollRestoreStep)
+})
+
+test("restore_gives_up_only_after_the_attempt_budget", () => {
+  const at = (attempts: number) =>
+    scrollRestoreStep({
+      target: 0,
+      scrollTop: 1,
+      scrollHeight: 22,
+      viewportHeight: 21,
+      currentSlack: 0,
+      boundary: false,
+      moreRows: false,
+      attempts,
+      maxAttempts: 8,
+    })
+  expect(at(7)).toEqual({ action: "retry" } satisfies ScrollRestoreStep)
+  expect(at(8)).toEqual({ action: "give-up" } satisfies ScrollRestoreStep)
+})

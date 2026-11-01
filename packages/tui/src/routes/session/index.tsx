@@ -117,7 +117,7 @@ import {
   type SessionRow,
 } from "./rows"
 import { switchLabel } from "../../util/model"
-import { findMessageBoundary, messageNavigationSlack } from "./message-navigation"
+import { findMessageBoundary, messageNavigationSlack, scrollRestoreStep } from "./message-navigation"
 import { stringWidth } from "../../util/string-width"
 import { useArgs } from "../../context/args"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
@@ -149,6 +149,9 @@ const BACKGROUND_TOOL_HINT_DELAY = 3_000
 // The tail comfortably overfills a tall viewport; older rows mount as the reader approaches them.
 const TRANSCRIPT_TAIL_ROWS = 40
 const TRANSCRIPT_BACKFILL_CHUNK = 60
+// A restore converges in at most 7 returned steps (see scrollRestoreStep); the 8th attempt is the
+// ceiling, since a second grow-rows chunk can be needed.
+const RESTORE_ATTEMPTS = 8
 
 export function Session(props: {
   sessionID: string
@@ -447,23 +450,6 @@ export function Session(props: {
       { defer: true },
     ),
   )
-  // Keep the reader where they were: content can arrive while the frame is hidden, so the stored
-  // anchor is re-applied when this session comes back to the front.
-  createEffect(
-    on(
-      () => props.active,
-      (active, previous) => {
-        if (previous === undefined) return
-        if (active === false) {
-          saveScrollAnchor()
-          return
-        }
-        if (!restored || !scroll || scroll.isDestroyed) return
-        restoreScrollPosition()
-      },
-    ),
-  )
-
   /** Runs after the next frame's layout and before it paints, unless the transcript was torn down. */
   const afterLayout = (continuation: () => void) => {
     if (!scroll || scroll.isDestroyed) return
@@ -641,49 +627,66 @@ export function Session(props: {
     const anchor = sessionTabs.scrollAnchor(sessionID)
     const index = anchor ? rows.findIndex((row) => containsAnchor(row, anchor.target)) : -1
     if (!anchor || index === -1) {
+      // Only a genuinely absent row may discard the anchor.
+      sessionTabs.setScrollAnchor(sessionID, undefined)
       scroll.scrollTo(scroll.scrollHeight)
       setAwayFromBottom(false)
       return
+    }
+    const giveUp = () => {
+      // Keep the saved anchor so the next activation retries instead of parking the reader here.
+      scroll.stickyScroll = true
+      scroll.scrollTo(scroll.scrollHeight)
+      setAwayFromBottom(false)
     }
     setHiddenRows(rowsBefore(weights(), index, TRANSCRIPT_BACKFILL_CHUNK))
     const end = rowsAfter(weights(), index, TRANSCRIPT_BACKFILL_CHUNK)
     setVisibleRowsEnd(end === rows.length ? undefined : end)
     scroll.stickyScroll = false
-    const restore = () =>
+    let attempts = 0
+    const attempt = (): void => {
+      // Structural budget check: every branch below re-enters here, so no branch can outrun it.
+      if (attempts >= RESTORE_ATTEMPTS) return giveUp()
       afterLayout(() => {
+        if (!scroll || scroll.isDestroyed) return
+        attempts += 1
         const boundary = anchors.get(anchor.target)
-        if (!boundary) {
-          sessionTabs.setScrollAnchor(sessionID, undefined)
-          scroll.stickyScroll = true
-          scroll.scrollTo(scroll.scrollHeight)
-          setAwayFromBottom(false)
-          return
-        }
-        const contentY = scroll.scrollTop + boundary.node.y - scroll.viewport.y
-        const target = contentY - anchor.screenY
-        const maximum = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
-        if (target > maximum && visibleEnd() < rows.length) {
+        const registered = boundary !== undefined && boundary.node.height > 0
+        const step = scrollRestoreStep({
+          target:
+            boundary !== undefined && registered
+              ? scroll.scrollTop + boundary.node.y - scroll.viewport.y - anchor.screenY
+              : 0,
+          scrollTop: scroll.scrollTop,
+          scrollHeight: scroll.scrollHeight,
+          viewportHeight: scroll.viewport.height,
+          currentSlack: scroll.getRenderable(NAVIGATION_SLACK_ID)?.height ?? 0,
+          boundary: registered,
+          moreRows: visibleEnd() < rows.length,
+          attempts,
+          maxAttempts: RESTORE_ATTEMPTS,
+        })
+        if (step.action === "grow-rows") {
           const next = rowsAfter(weights(), visibleEnd(), TRANSCRIPT_BACKFILL_CHUNK)
           setVisibleRowsEnd(next === rows.length ? undefined : next)
-          restore()
-          return
+          return attempt()
         }
-        if (target > maximum) {
-          setNavigationSlack(
-            messageNavigationSlack({
-              top: target,
-              viewportHeight: scroll.viewport.height,
-              scrollHeight: scroll.scrollHeight,
-              currentSlack: scroll.getRenderable(NAVIGATION_SLACK_ID)?.height ?? 0,
-            }),
-          )
-          restore()
-          return
+        if (step.action === "grow-slack") {
+          setNavigationSlack(step.slack)
+          return attempt()
         }
-        scroll.scrollTo(target)
-        updateAwayFromBottom()
+        if (step.action === "retry") return attempt()
+        // Exactly one bounded verification attempt follows every scroll: the box clamps silently
+        // when the content shrank after this layout, and only the next layout reports it.
+        if (step.action === "scroll") {
+          scroll.scrollTo(step.scrollTop)
+          return attempt()
+        }
+        if (step.action === "settle") return updateAwayFromBottom()
+        giveUp()
       })
-    restore()
+    }
+    attempt()
   }
 
   createEffect(() => {
@@ -1526,15 +1529,22 @@ export function Session(props: {
   }))
 
   // A retained frame keeps its state while hidden; only in-view navigation state is dropped.
+  // Capture the anchor first: clearMessageNavigation() drops the navigation slack, which changes
+  // the transcript's scroll height, and the anchor must describe the viewport before that.
   createEffect(
     on(
       () => props.active,
-      (active) => {
-        if (active !== false) return
-        setComposer("open", false)
-        clearMessageNavigation()
+      (active, previous) => {
+        if (previous === undefined) return
+        if (active === false) {
+          saveScrollAnchor()
+          setComposer("open", false)
+          clearMessageNavigation()
+          return
+        }
+        if (!restored || !scroll || scroll.isDestroyed) return
+        restoreScrollPosition()
       },
-      { defer: true },
     ),
   )
 
