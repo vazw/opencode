@@ -13,7 +13,6 @@ import { discoverPluginRuntimeSpecifiers, pluginRuntimeLoaderCode } from "@openc
 import { buildAppArchive } from "./app-assets"
 import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
 import { resolveOpencodePty } from "./opencode-pty"
-import { wsStarReexportPlugin } from "./ws-reexport"
 import { NativeArch } from "../../../script/native-arch"
 import { bundledModelsSnapshot, modelsSnapshotPlugin } from "../../core/script/models-snapshot"
 
@@ -182,7 +181,6 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       wsReexportPlugin,
       simulationGraphPlugin,
       modelsSnapshot,
-      wsStarReexportPlugin,
     ],
     external: ["node-gyp"],
     format: "esm",
